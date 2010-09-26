@@ -3,17 +3,72 @@
 (ns yeuk.net
   (:use [yeuk db core prefs])
   (:import [java.net ServerSocket Socket]
-	   [java.io ObjectInputStream ObjectOutputStream]))
+	   [java.io ObjectInputStream ObjectOutputStream BufferedReader PrintWriter])
+  (:require [clojure.java.io :as io]))
 
-(defn send-raw [text socket]
+(defn send-raw [text client]
   "Sends the text as is to the socket"
-  (let [out (ObjectOutputStream. (.getOutputStream socket))]
-    (.writeObject out text)))
+  (println "SENDING" text)
+  (binding [*out* (:sockout client)]
+    (println text)))
 
-(defn send-raw-to-all [text]
+(defn send-raw-global [text]
   "Sends text to each of the clients"
   (doseq [client (:users @state)]
-    (send-raw text client)))
+    (send-raw text (second client))))
+
+(defn send-line [text client]
+  "Sends a line of text to a client connection"
+  (send-raw (str ":" (:server-name prefs)  " " text) client))
+
+(defn send-notice [text client]
+  "Sends a notice to the client"
+  (send-line (str "NOTICE " (:nick client) " :" text) client))
+
+(defn read-irc-line [client]
+  "Reads a line from client. Blocks for IO"
+  (binding [*in* (:sockin client)]
+    (read-line)))
+
+(defn close-socket [client]
+  (.close (:socket client)))
+
+(defn handle-USER [string client]
+  "Handles the USER command"
+  (let [split (.split (.trim string) " |:")
+	nick (first split)
+	host (second split)
+	server (nth split 3)
+	real (apply str (interpose " " (rest (drop 3 split))))]
+    (send-notice (str "*** Found your hostname (" host ")") client)))
+    
+
+(defn log-client [client]
+  "Logs the activity of client to database"
+  (.start
+   (Thread.
+    (fn []
+      (loop []
+	; TODO: make this actually log
+	(when-let [line (read-irc-line client)]
+	  (print (:socket client) line)
+	  (recur)))))))
+
+(defn handle-connection [connection]
+  "Handles a new IRC connection"
+  (println "I GOT A NEW CONNECTION" connection)
+  (let [in  (io/reader connection)
+	out (PrintWriter. (io/writer connection) true)
+	client-map { :socket connection :hostname "unknown" :nick "*" :sockin in :sockout out }]
+    
+    (when (:log prefs)
+      (log-client client-map))
+    
+    (send-notice "*** Looking up your hostname..." client-map)
+    (loop [ line (.trim (read-irc-line client-map))]
+      (if (= (apply str (take 4 line)) "USER")
+	(future (handle-USER (apply str (drop 4 line)) client-map))
+	(recur (.trim (read-irc-line client-map)))))))
 
 (defn start-server []
   "Starts up the IRC server"
@@ -28,18 +83,6 @@
     "Stops the IRC server. Users should be disconnected already"
     (.close (:server @state)))
 
-  ;ObjectInputStream ois = new ObjectInputStream(socket.getInputStream());
-  ;String message = (String) ois.readObject();
- ; System.out.println("Message Received: " + message);
- 
-
-  (defn handle-connection [connection]
-    "Handles a new IRC connection"
-    (println "I GOTS A CONNECTION")
-    (let [in (ObjectInputStream. (.getInputStream connection))
-	  out (ObjectOutputStream. (.getOutputStream connection))]
-	(send-raw "HI!\r\n" connection)))
-  
   (defn server-listen []
     "Accepts connections to the server, infinite loop in a new thread"
     (.start
@@ -47,7 +90,6 @@
       (fn []
 	(while true
 	  (let [connection (.accept (:server @state))]
-	    (println "I ACCEPTED A CONNECTION!")
 	    ; using future so that handle-connection doesn't block
 	    (future (handle-connection connection))))))))
 	 
